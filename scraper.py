@@ -3,15 +3,18 @@ import requests
 import json
 import urllib.parse
 import random
+import time
 from tavily import TavilyClient
 from groq import Groq
 
-# 從 Secrets 讀取 API Key
+# 讀取 Keys
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
+# 定義一張預設的安全圖片 (Unsplash)
+DEFAULT_IMAGE = "https://images.unsplash.com/photo-1555939594-58d7cb561ad1"
+
 def get_gmap_link(location_name):
-    """產生 Google Maps 連結"""
     query = urllib.parse.quote(location_name)
     return f"https://www.google.com/maps/search/?api=1&query={query}"
 
@@ -24,6 +27,7 @@ def analyze_with_ai(text_content, source):
     client = Groq(api_key=GROQ_API_KEY)
     print(f"🧠 [Groq AI] 正在分析 ({source})...")
     
+    # 🔥 修改點 1: 更新 Prompt，請 AI 順便抓圖片網址
     prompt = f"""
     你是一個資料萃取機器人。請閱讀以下資料，找出推薦的「店家名稱」。
     
@@ -34,8 +38,9 @@ def analyze_with_ai(text_content, source):
     1. 回傳 JSON 陣列，格式為：
        [{{
            "name": "店名", 
-           "address": "店家地址(如果文章有寫，沒寫請回傳空字串)", 
-           "summary": "15字以內的特色短評"
+           "address": "地址(沒寫回傳空字串)", 
+           "summary": "15字特色短評",
+           "image_url": "請從文章中找出代表該店食物的圖片連結(網址)。如果找不到、或者是Plan B摘要模式，請回傳 null"
        }}]
     2. 至少抓 5 間。
     3. 只要 JSON，不要廢話。
@@ -49,7 +54,6 @@ def analyze_with_ai(text_content, source):
         )
         ai_response = chat_completion.choices[0].message.content
         
-        # 解析 JSON
         start_idx = ai_response.find('[')
         end_idx = ai_response.rfind(']') + 1
         
@@ -64,25 +68,22 @@ def scrape_web(keyword):
     print(f"\n🚀 [系統] 收到 LINE 請求，目標：{keyword}")
     
     if not TAVILY_API_KEY or not GROQ_API_KEY:
-        print("❌ 錯誤：請確認 Secrets 裡有 TAVILY_API_KEY 和 GROQ_API_KEY")
+        print("❌ 錯誤：請確認 Secrets 裡有 Keys")
         return []
 
     tavily = TavilyClient(api_key=TAVILY_API_KEY)
     
-    # 1. 黑名單 (避開無法讀取的網站)
     blacklist_domains = [
         "instagram.com", "facebook.com", "youtube.com", "tiktok.com", 
         "twitter.com", "threads.net", "dcard.tw",
         "trip.com", "klook.com", "kkday.com", "agoda.com", "booking.com"
     ]
 
-    # 搜尋策略
     random_terms = ["推薦", "必吃", "懶人包", "食記", "評價", "排行榜"]
     search_term = f"{keyword} {random.choice(random_terms)}"
     print(f"🔍 [Tavily] 正在搜尋：{search_term} ...")
 
     try:
-        # 一次抓 10 篇回來當候補
         search_result = tavily.search(
             query=search_term, 
             search_depth="basic", 
@@ -94,18 +95,17 @@ def scrape_web(keyword):
         return []
 
     if not search_result['results']:
-        return [] # 真的沒東西就回傳空
+        return []
 
-    # 準備文章池
     articles_pool = search_result['results']
     random.shuffle(articles_pool)
     
-    # ==========================================
-    # 🔄 迴圈重試機制 (最多 3 次)
-    # ==========================================
     max_retries = 3
     final_shops = []
 
+    # ==========================================
+    # Plan A: 全文模式 (比較有機會抓到圖)
+    # ==========================================
     for attempt in range(1, max_retries + 1):
         if not articles_pool:
             break
@@ -132,7 +132,7 @@ def scrape_web(keyword):
             print(f"⚠️ 連線錯誤: {e}")
 
     # ==========================================
-    # 🛡️ B計畫：搜尋摘要救場
+    # Plan B: 摘要模式 (絕對沒圖，AI 會回傳 null)
     # ==========================================
     if not final_shops:
         print("🛡️ [B計畫] 啟動！改用「搜尋摘要」分析...")
@@ -143,24 +143,37 @@ def scrape_web(keyword):
         final_shops = analyze_with_ai(snippets_text, source="搜尋摘要")
 
     # ==========================================
-    # 📊 整理最終結果
+    # 整理結果 (決定要用哪張圖)
     # ==========================================
     if final_shops:
-        # 隨機選 5 間
         selected = random.sample(final_shops, min(5, len(final_shops)))
         
         results = []
         for shop in selected:
-            # 處理顯示文字
             raw_address = shop.get('address', '').strip()
             summary = shop.get('summary', '網友推薦美食')
             
+            # 🔥 修改點 2: 圖片判斷邏輯
+            # 1. 取得 AI 抓到的圖
+            ai_image = shop.get('image_url')
+            
+            # 2. 檢查圖片是否有效 (不是 None，且是 http 開頭)
+            if ai_image and ai_image.startswith("http"):
+                # 這裡可以再加一個小判斷，如果是 .svg 結尾的通常是 icon，不要用
+                if ".svg" in ai_image:
+                    display_image = DEFAULT_IMAGE
+                else:
+                    display_image = ai_image
+            else:
+                # 3. 如果沒抓到，用預設圖
+                display_image = DEFAULT_IMAGE
+
+            # 處理文字
             if len(raw_address) > 2:
                 display_text = f"📍 {raw_address} | 📝 {summary}"
             else:
                 display_text = f"📝 {summary}"
 
-            # 截斷過長的文字
             if len(display_text) > 60:
                 display_text = display_text[:57] + "..."
 
@@ -168,7 +181,7 @@ def scrape_web(keyword):
                 "name": shop['name'],
                 "address": display_text,     
                 "score": "精選",             
-                "image": "https://images.unsplash.com/photo-1555939594-58d7cb561ad1", # 統一用這張美食圖
+                "image": display_image,      # 使用剛剛判斷完的圖片
                 "link": get_gmap_link(shop['name'])
             })
         return results
