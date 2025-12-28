@@ -5,104 +5,66 @@ Created on Sun Dec 28 17:08:57 2025
 @author: sasha
 """
 
-import requests
-from bs4 import BeautifulSoup
-import random
+import os
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, FlexSendMessage
+from scraper import scrape_web # 引入新的搜尋功能
 
-# ==========================================
-# 1. 爬美食 (愛食記 iFoodie)
-# ==========================================
-def scrape_ifoodie(location, keyword):
-    print(f"🕷️ [美食模式] 正在爬取：{location} 的 {keyword} ...")
-    url = f"https://ifoodie.tw/explore/{location}/list/{keyword}"
-    headers = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" }
+app = Flask(__name__)
 
-    try:
-        response = requests.get(url, headers=headers, timeout=5)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, "html.parser")
-            items = soup.find_all("div", class_="restaurant-item", limit=5)
-            results = []
-            for item in items:
-                try:
-                    title = item.find("a", class_="title-text").text.strip()
-                    img_tag = item.find("img", class_="lazy-load")
-                    image = img_tag["data-src"] if img_tag and "data-src" in img_tag.attrs else "https://images.unsplash.com/photo-1504674900247-0877df9cc836"
-                    rating = item.find("div", class_="text").text.strip() if item.find("div", class_="text") else "4.0"
-                    address = item.find("div", class_="address-row").text.strip() if item.find("div", class_="address-row") else "地址詳見連結"
-                    link = "https://ifoodie.tw" + item.find("a", class_="title-text")["href"]
-                    
-                    results.append({ "name": title, "score": rating, "image": image, "address": address, "link": link })
-                except: continue
-            
-            if results: return results
-    except Exception as e:
-        print(f"❌ 美食爬蟲錯誤: {e}")
-    
-    return [] # 失敗回傳空陣列
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('CHANNEL_ACCESS_TOKEN')
+LINE_CHANNEL_SECRET = os.environ.get('CHANNEL_SECRET')
 
-# ==========================================
-# 2. 爬景點 (旅遊王 TravelKing)
-# ==========================================
-def scrape_travelking(keyword):
-    print(f"🕷️ [景點模式] 正在爬取：{keyword} ...")
-    # 旅遊王的搜尋網址結構
-    url = f"https://www.travelking.com.tw/tourguide/search/qw.asp?q={keyword}"
-    headers = { "User-Agent": "Mozilla/5.0" }
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-    try:
-        response = requests.get(url, headers=headers, timeout=5)
-        response.encoding = 'utf-8' # 強制編碼，避免亂碼
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, "html.parser")
-            # 抓取搜尋結果列表
-            box = soup.find("div", class_="box_search")
-            if box:
-                items = box.find_all("li", limit=5)
-                results = []
-                for item in items:
-                    try:
-                        # 抓標題與連結
-                        h4 = item.find("h4")
-                        if not h4: continue
-                        a_tag = h4.find("a")
-                        title = a_tag.text.strip()
-                        link = a_tag["href"]
-                        
-                        # 抓簡介 (作為地址或描述顯示)
-                        desc = item.find("div", class_="text").text.strip()[:30] + "..." if item.find("div", class_="text") else "熱門景點"
-                        
-                        # 抓圖片 (旅遊王搜尋頁有時沒圖，我們用隨機風景圖取代，讓卡片好看)
-                        image = "https://images.unsplash.com/photo-1469854523086-cc02fe5d8800" 
-
-                        # 嘗試抓取真實圖片 (如果有)
-                        img_tag = item.find("img")
-                        if img_tag and "src" in img_tag.attrs:
-                            image = img_tag["src"]
-
-                        results.append({
-                            "name": title,
-                            "score": "推薦", # 景點通常沒評分，改顯示文字
-                            "image": image,
-                            "address": desc, # 這裡改放簡介
-                            "link": link
-                        })
-                    except: continue
-                
-                if results: return results
-    except Exception as e:
-        print(f"❌ 景點爬蟲錯誤: {e}")
-
-    # ==========================================
-    # 3. 備援資料 (如果兩個都掛掉)
-    # ==========================================
-    return [
-        {
-            "name": f"搜尋失敗: {keyword}",
-            "score": "N/A",
-            "image": "https://images.unsplash.com/photo-1594322436404-5a0526db4d13",
-            "address": "系統忙線中或找不到資料，請稍後再試",
-            "link": "https://www.google.com/maps"
+def create_carousel(spots):
+    bubbles = []
+    for spot in spots[:5]:
+        bubble = {
+            "type": "bubble",
+            "hero": { "type": "image", "url": spot["image"], "size": "full", "aspectRatio": "20:13", "aspectMode": "cover" },
+            "body": {
+                "type": "box", "layout": "vertical", "contents": [
+                    { "type": "text", "text": spot["name"], "weight": "bold", "size": "xl", "wrap": True },
+                    { "type": "text", "text": spot["address"], "size": "sm", "color": "#aaaaaa", "wrap": True }
+                ]
+            },
+            "footer": {
+                "type": "box", "layout": "vertical", "contents": [
+                    { "type": "button", "action": { "type": "uri", "label": "🔗 點我查看", "uri": spot["link"] }, "style": "primary", "color": "#1DB446" }
+                ]
+            }
         }
-    ]
+        bubbles.append(bubble)
+    return { "type": "carousel", "contents": bubbles }
+
+@app.route("/")
+def home(): return "搜尋引擎 Bot 運作中"
+
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
+    try: handler.handle(body, signature)
+    except InvalidSignatureError: abort(400)
+    return 'OK'
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_msg = event.message.text.strip()
+    print(f"收到指令：{user_msg}")
+    
+    # 直接去搜尋
+    spots = scrape_web(user_msg)
+    
+    flex = create_carousel(spots)
+    line_bot_api.reply_message(
+        event.reply_token,
+        FlexSendMessage(alt_text=f"{user_msg} 搜尋結果", contents=flex)
+    )
+
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=8080)
