@@ -22,7 +22,7 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 def create_carousel(spots):
     bubbles = []
-    for spot in spots[:5]:
+    for spot in spots[:15]:
         bubble = {
             "type": "bubble",
             "hero": { "type": "image", "url": spot["image"], "size": "full", "aspectRatio": "20:13", "aspectMode": "cover" },
@@ -68,3 +68,4 @@ def handle_message(event):
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=8080)
+
