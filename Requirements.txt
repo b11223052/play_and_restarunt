@@ -2,3 +2,5 @@ flask
 line-bot-sdk
 requests
 tavily-python
+groq
+beautifulsoup4
